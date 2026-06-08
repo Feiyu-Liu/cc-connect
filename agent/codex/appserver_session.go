@@ -146,6 +146,8 @@ type appServerSession struct {
 	model         string
 	effort        string
 	mode          string
+	cliBin        string
+	cliExtraArgs  []string
 	baseURL       string
 	modelProvider string
 	extraEnv      []string
@@ -189,14 +191,22 @@ const (
 	appServerUsageRefreshTimeout = 1500 * time.Millisecond
 )
 
-func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode, resumeID, baseURL, modelProvider string, extraEnv []string, codexHome string) (*appServerSession, error) {
+var appServerExecCommandContext = exec.CommandContext
+
+func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode, resumeID, baseURL, modelProvider string, cliBin string, cliExtraArgs []string, extraEnv []string, codexHome string) (*appServerSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
+	cliBin = strings.TrimSpace(cliBin)
+	if cliBin == "" {
+		cliBin = "codex"
+	}
 	s := &appServerSession{
 		url:              url,
 		workDir:          workDir,
 		model:            model,
 		effort:           effort,
 		mode:             mode,
+		cliBin:           cliBin,
+		cliExtraArgs:     append([]string(nil), cliExtraArgs...),
 		baseURL:          baseURL,
 		modelProvider:    modelProvider,
 		extraEnv:         append([]string(nil), extraEnv...),
@@ -231,23 +241,8 @@ func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode,
 }
 
 func (s *appServerSession) connect() error {
-	args := []string{"app-server"}
-	if strings.TrimSpace(s.url) != "" {
-		args = append(args, "--listen", strings.TrimSpace(s.url))
-	}
-	if model := strings.TrimSpace(s.model); model != "" {
-		args = append(args, "-c", fmt.Sprintf("model=%q", model))
-	}
-	if effort := strings.TrimSpace(s.effort); effort != "" {
-		args = append(args, "-c", fmt.Sprintf("model_reasoning_effort=%q", effort))
-	}
-	if provider := strings.TrimSpace(s.modelProvider); provider != "" {
-		args = append(args, "-c", fmt.Sprintf("model_provider=%q", provider))
-	}
-	if baseURL := strings.TrimSpace(s.baseURL); baseURL != "" {
-		args = append(args, "-c", fmt.Sprintf("openai_base_url=%q", baseURL))
-	}
-	cmd := exec.CommandContext(s.ctx, "codex", args...)
+	cmdBin, cmdArgs := s.appServerCommand()
+	cmd := appServerExecCommandContext(s.ctx, cmdBin, cmdArgs...)
 	cmd.Dir = s.workDir
 	env := append([]string(nil), s.extraEnv...)
 	if s.codexHome != "" {
@@ -285,6 +280,36 @@ func (s *appServerSession) connect() error {
 	go s.stderrLoop(stderr)
 	go s.waitLoop()
 	return nil
+}
+
+func (s *appServerSession) appServerCommand() (string, []string) {
+	cliBin := strings.TrimSpace(s.cliBin)
+	if cliBin == "" {
+		cliBin = "codex"
+	}
+	return cliBin, s.appServerCommandArgs()
+}
+
+func (s *appServerSession) appServerCommandArgs() []string {
+	args := []string{"app-server"}
+	if strings.TrimSpace(s.url) != "" {
+		args = append(args, "--listen", strings.TrimSpace(s.url))
+	}
+	if model := strings.TrimSpace(s.model); model != "" {
+		args = append(args, "-c", fmt.Sprintf("model=%q", model))
+	}
+	if effort := strings.TrimSpace(s.effort); effort != "" {
+		args = append(args, "-c", fmt.Sprintf("model_reasoning_effort=%q", effort))
+	}
+	if provider := strings.TrimSpace(s.modelProvider); provider != "" {
+		args = append(args, "-c", fmt.Sprintf("model_provider=%q", provider))
+	}
+	if baseURL := strings.TrimSpace(s.baseURL); baseURL != "" {
+		args = append(args, "-c", fmt.Sprintf("openai_base_url=%q", baseURL))
+	}
+	cmdArgs := append([]string(nil), s.cliExtraArgs...)
+	cmdArgs = append(cmdArgs, args...)
+	return cmdArgs
 }
 
 func (s *appServerSession) initialize() error {

@@ -13,6 +13,71 @@ import (
 	"github.com/chenhg5/cc-connect/core"
 )
 
+func TestAppServerSession_UsesConfiguredCLIPath(t *testing.T) {
+	s := &appServerSession{
+		cliBin:       "omx",
+		cliExtraArgs: []string{"--profile", "test"},
+		url:          "stdio://",
+		model:        "gpt-5.4",
+		effort:       "high",
+	}
+
+	got := s.appServerCommandArgs()
+	wantPrefix := []string{"--profile", "test", "app-server", "--listen", "stdio://"}
+	if len(got) < len(wantPrefix) {
+		t.Fatalf("command args = %v, want prefix %v", got, wantPrefix)
+	}
+	for i, want := range wantPrefix {
+		if got[i] != want {
+			t.Fatalf("command args = %v, want prefix %v", got, wantPrefix)
+		}
+	}
+}
+
+func TestAppServerSession_AppServerCommandDefaultsToCodex(t *testing.T) {
+	s := &appServerSession{
+		url:    "stdio://",
+		model:  "gpt-5.4",
+		effort: "high",
+	}
+
+	gotBin, gotArgs := s.appServerCommand()
+	if gotBin != "codex" {
+		t.Fatalf("command binary = %q, want codex", gotBin)
+	}
+	wantPrefix := []string{"app-server", "--listen", "stdio://"}
+	if len(gotArgs) < len(wantPrefix) {
+		t.Fatalf("command args = %v, want prefix %v", gotArgs, wantPrefix)
+	}
+	for i, want := range wantPrefix {
+		if gotArgs[i] != want {
+			t.Fatalf("command args = %v, want prefix %v", gotArgs, wantPrefix)
+		}
+	}
+}
+
+func TestAppServerSession_AppServerCommandUsesConfiguredBinary(t *testing.T) {
+	s := &appServerSession{
+		cliBin:       "omx",
+		cliExtraArgs: []string{"--profile", "test"},
+		url:          "stdio://",
+	}
+
+	gotBin, gotArgs := s.appServerCommand()
+	if gotBin != "omx" {
+		t.Fatalf("command binary = %q, want omx", gotBin)
+	}
+	wantPrefix := []string{"--profile", "test", "app-server", "--listen", "stdio://"}
+	if len(gotArgs) < len(wantPrefix) {
+		t.Fatalf("command args = %v, want prefix %v", gotArgs, wantPrefix)
+	}
+	for i, want := range wantPrefix {
+		if gotArgs[i] != want {
+			t.Fatalf("command args = %v, want prefix %v", gotArgs, wantPrefix)
+		}
+	}
+}
+
 func TestAppServerSession_ApplyThreadRuntimeState(t *testing.T) {
 	s := &appServerSession{}
 	effort := "xhigh"
