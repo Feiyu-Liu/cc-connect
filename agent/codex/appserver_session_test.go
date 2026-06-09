@@ -322,6 +322,53 @@ func TestAppServerSession_AgentMessageCompletedFallsBackWhenNoDelta(t *testing.T
 	}
 }
 
+func TestAppServerSession_ToolEventsIncludeStableItemMetadata(t *testing.T) {
+	s := &appServerSession{events: make(chan core.Event, 8)}
+
+	s.handleNotification("item/started", mustMarshalRaw(t, map[string]any{
+		"threadId": "thread-1",
+		"turnId":   "turn-1",
+		"item": map[string]any{
+			"id":      "tool-item-1",
+			"type":    "commandExecution",
+			"command": "pwd",
+		},
+	}))
+	s.handleNotification("item/completed", mustMarshalRaw(t, map[string]any{
+		"threadId": "thread-1",
+		"turnId":   "turn-1",
+		"item": map[string]any{
+			"id":               "tool-item-1",
+			"type":             "commandExecution",
+			"command":          "pwd",
+			"status":           "completed",
+			"aggregatedOutput": "/tmp/project",
+		},
+	}))
+
+	started := recvCoreEvent(t, s.events)
+	if started.Type != core.EventToolUse || started.ToolName != "Bash" {
+		t.Fatalf("started event = %#v, want Bash tool use", started)
+	}
+	if started.SessionID != "thread-1" ||
+		started.Metadata["thread_id"] != "thread-1" ||
+		started.Metadata["turn_id"] != "turn-1" ||
+		started.Metadata["item_id"] != "tool-item-1" {
+		t.Fatalf("started metadata = session %q metadata %#v", started.SessionID, started.Metadata)
+	}
+
+	completed := recvCoreEvent(t, s.events)
+	if completed.Type != core.EventToolResult || completed.ToolName != "Bash" {
+		t.Fatalf("completed event = %#v, want Bash tool result", completed)
+	}
+	if completed.SessionID != "thread-1" ||
+		completed.Metadata["thread_id"] != "thread-1" ||
+		completed.Metadata["turn_id"] != "turn-1" ||
+		completed.Metadata["item_id"] != "tool-item-1" {
+		t.Fatalf("completed metadata = session %q metadata %#v", completed.SessionID, completed.Metadata)
+	}
+}
+
 func TestAppServerSession_HandleRequestUserInputEmitsAskQuestion(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

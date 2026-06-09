@@ -1136,13 +1136,13 @@ func (s *appServerSession) handleNotification(method string, paramsRaw json.RawM
 	case "item/started":
 		var notif itemNotification
 		if err := json.Unmarshal(paramsRaw, &notif); err == nil {
-			s.handleItemStarted(notif.Item)
+			s.handleItemStarted(notif)
 		}
 
 	case "item/completed":
 		var notif itemNotification
 		if err := json.Unmarshal(paramsRaw, &notif); err == nil {
-			s.handleItemCompleted(notif.Item)
+			s.handleItemCompleted(notif)
 		}
 
 	case "item/agentMessage/delta":
@@ -1220,7 +1220,8 @@ func (s *appServerSession) handleAgentMessageDelta(notif appServerAgentMessageDe
 	})
 }
 
-func (s *appServerSession) handleItemStarted(item map[string]any) {
+func (s *appServerSession) handleItemStarted(notif itemNotification) {
+	item := notif.Item
 	itemType, _ := item["type"].(string)
 	if itemType == "" {
 		return
@@ -1232,42 +1233,75 @@ func (s *appServerSession) handleItemStarted(item map[string]any) {
 	}
 
 	s.flushPendingAsThinking()
+	sessionID, metadata := s.itemEventContext(notif)
 
 	switch itemType {
 	case "commandExecution":
 		command, _ := item["command"].(string)
-		s.emit(core.Event{Type: core.EventToolUse, ToolName: "Bash", ToolInput: command})
+		s.emit(core.Event{
+			Type:      core.EventToolUse,
+			ToolName:  "Bash",
+			ToolInput: command,
+			SessionID: sessionID,
+			Metadata:  metadata,
+		})
 
 	case "mcpToolCall":
 		server, _ := item["server"].(string)
 		tool, _ := item["tool"].(string)
 		name := strings.Trim(strings.Join([]string{server, tool}, ":"), ":")
-		s.emit(core.Event{Type: core.EventToolUse, ToolName: "MCP", ToolInput: name + "\n" + appServerJSON(item["arguments"])})
+		s.emit(core.Event{
+			Type:      core.EventToolUse,
+			ToolName:  "MCP",
+			ToolInput: name + "\n" + appServerJSON(item["arguments"]),
+			SessionID: sessionID,
+			Metadata:  metadata,
+		})
 
 	case "webSearch":
 		query, _ := item["query"].(string)
-		s.emit(core.Event{Type: core.EventToolUse, ToolName: "WebSearch", ToolInput: query})
+		s.emit(core.Event{
+			Type:      core.EventToolUse,
+			ToolName:  "WebSearch",
+			ToolInput: query,
+			SessionID: sessionID,
+			Metadata:  metadata,
+		})
 
 	case "dynamicToolCall":
 		tool, _ := item["tool"].(string)
-		s.emit(core.Event{Type: core.EventToolUse, ToolName: tool, ToolInput: appServerJSON(item["arguments"])})
+		s.emit(core.Event{
+			Type:      core.EventToolUse,
+			ToolName:  tool,
+			ToolInput: appServerJSON(item["arguments"]),
+			SessionID: sessionID,
+			Metadata:  metadata,
+		})
 
 	case "fileChange":
-		s.emit(core.Event{Type: core.EventToolUse, ToolName: "Patch", ToolInput: appServerJSON(item["changes"])})
+		s.emit(core.Event{
+			Type:      core.EventToolUse,
+			ToolName:  "Patch",
+			ToolInput: appServerJSON(item["changes"]),
+			SessionID: sessionID,
+			Metadata:  metadata,
+		})
 	}
 }
 
-func (s *appServerSession) handleItemCompleted(item map[string]any) {
+func (s *appServerSession) handleItemCompleted(notif itemNotification) {
+	item := notif.Item
 	itemType, _ := item["type"].(string)
 	if itemType == "" {
 		return
 	}
+	sessionID, metadata := s.itemEventContext(notif)
 
 	switch itemType {
 	case "reasoning":
 		text := appServerReasoningText(item)
 		if text != "" {
-			s.emit(core.Event{Type: core.EventThinking, Content: text})
+			s.emit(core.Event{Type: core.EventThinking, Content: text, SessionID: sessionID, Metadata: metadata})
 		}
 
 	case "agentMessage":
@@ -1305,6 +1339,8 @@ func (s *appServerSession) handleItemCompleted(item map[string]any) {
 			ToolStatus:   strings.TrimSpace(status),
 			ToolExitCode: exitCodePtr,
 			ToolSuccess:  &success,
+			SessionID:    sessionID,
+			Metadata:     metadata,
 		})
 
 	case "mcpToolCall":
@@ -1321,6 +1357,8 @@ func (s *appServerSession) handleItemCompleted(item map[string]any) {
 			ToolResult:  truncate(strings.TrimSpace(result), 500),
 			ToolStatus:  strings.TrimSpace(status),
 			ToolSuccess: &success,
+			SessionID:   sessionID,
+			Metadata:    metadata,
 		})
 
 	case "webSearch":
@@ -1329,6 +1367,8 @@ func (s *appServerSession) handleItemCompleted(item map[string]any) {
 			Type:       core.EventToolResult,
 			ToolName:   "WebSearch",
 			ToolResult: truncate(strings.TrimSpace(query), 500),
+			SessionID:  sessionID,
+			Metadata:   metadata,
 		})
 
 	case "dynamicToolCall":
@@ -1342,8 +1382,25 @@ func (s *appServerSession) handleItemCompleted(item map[string]any) {
 			ToolResult:  truncate(strings.TrimSpace(result), 500),
 			ToolStatus:  strings.TrimSpace(status),
 			ToolSuccess: &success,
+			SessionID:   sessionID,
+			Metadata:    metadata,
 		})
 	}
+}
+
+func (s *appServerSession) itemEventContext(notif itemNotification) (string, map[string]any) {
+	threadID := strings.TrimSpace(notif.ThreadID)
+	if threadID == "" {
+		threadID = s.CurrentSessionID()
+	}
+	itemID, _ := notif.Item["id"].(string)
+	itemID = strings.TrimSpace(itemID)
+	metadata := map[string]any{
+		"thread_id": threadID,
+		"turn_id":   strings.TrimSpace(notif.TurnID),
+		"item_id":   itemID,
+	}
+	return threadID, metadata
 }
 
 func appServerReasoningText(item map[string]any) string {
