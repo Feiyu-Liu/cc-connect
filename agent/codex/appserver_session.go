@@ -81,6 +81,13 @@ type itemNotification struct {
 	Item     map[string]any `json:"item"`
 }
 
+type appServerAgentMessageDeltaNotification struct {
+	ThreadID string `json:"threadId"`
+	TurnID   string `json:"turnId"`
+	ItemID   string `json:"itemId"`
+	Delta    string `json:"delta"`
+}
+
 type errorNotification struct {
 	Message string `json:"message"`
 }
@@ -177,9 +184,10 @@ type appServerSession struct {
 	closeOnce sync.Once
 	wg        sync.WaitGroup
 
-	stateMu     sync.Mutex
-	pendingMsgs []string
-	currentTurn string
+	stateMu                   sync.Mutex
+	pendingMsgs               []string
+	currentTurn               string
+	streamedAgentMessageItems map[string]struct{}
 
 	runtimeMu sync.RWMutex
 	usage     *core.UsageReport
@@ -323,7 +331,6 @@ func (s *appServerSession) initialize() error {
 			"experimentalApi": true,
 			"optOutNotificationMethods": []string{
 				"command/exec/outputDelta",
-				"item/agentMessage/delta",
 				"item/plan/delta",
 				"item/fileChange/outputDelta",
 				"item/reasoning/summaryTextDelta",
@@ -1121,6 +1128,7 @@ func (s *appServerSession) handleNotification(method string, paramsRaw json.RawM
 			s.stateMu.Lock()
 			s.currentTurn = notif.Turn.ID
 			s.pendingMsgs = s.pendingMsgs[:0]
+			s.streamedAgentMessageItems = make(map[string]struct{})
 			s.stateMu.Unlock()
 			s.storeContextUsage(nil)
 		}
@@ -1135,6 +1143,12 @@ func (s *appServerSession) handleNotification(method string, paramsRaw json.RawM
 		var notif itemNotification
 		if err := json.Unmarshal(paramsRaw, &notif); err == nil {
 			s.handleItemCompleted(notif.Item)
+		}
+
+	case "item/agentMessage/delta":
+		var notif appServerAgentMessageDeltaNotification
+		if err := json.Unmarshal(paramsRaw, &notif); err == nil {
+			s.handleAgentMessageDelta(notif)
 		}
 
 	case "turn/completed":
@@ -1173,6 +1187,37 @@ func (s *appServerSession) handleNotification(method string, paramsRaw json.RawM
 			s.emitError(fmt.Errorf("%s", notif.Message))
 		}
 	}
+}
+
+func (s *appServerSession) handleAgentMessageDelta(notif appServerAgentMessageDeltaNotification) {
+	delta := notif.Delta
+	if strings.TrimSpace(delta) == "" {
+		return
+	}
+	threadID := strings.TrimSpace(notif.ThreadID)
+	if threadID == "" {
+		threadID = s.CurrentSessionID()
+	}
+	itemID := strings.TrimSpace(notif.ItemID)
+	if itemID != "" {
+		s.stateMu.Lock()
+		if s.streamedAgentMessageItems == nil {
+			s.streamedAgentMessageItems = make(map[string]struct{})
+		}
+		s.streamedAgentMessageItems[itemID] = struct{}{}
+		s.stateMu.Unlock()
+	}
+	s.emit(core.Event{
+		Type:      core.EventText,
+		Content:   delta,
+		SessionID: threadID,
+		Metadata: map[string]any{
+			"thread_id": threadID,
+			"turn_id":   strings.TrimSpace(notif.TurnID),
+			"item_id":   itemID,
+			"is_delta":  true,
+		},
+	})
 }
 
 func (s *appServerSession) handleItemStarted(item map[string]any) {
@@ -1227,6 +1272,15 @@ func (s *appServerSession) handleItemCompleted(item map[string]any) {
 
 	case "agentMessage":
 		text, _ := item["text"].(string)
+		itemID, _ := item["id"].(string)
+		if itemID != "" {
+			s.stateMu.Lock()
+			_, alreadyStreamed := s.streamedAgentMessageItems[itemID]
+			s.stateMu.Unlock()
+			if alreadyStreamed {
+				return
+			}
+		}
 		if strings.TrimSpace(text) != "" {
 			s.stateMu.Lock()
 			s.pendingMsgs = append(s.pendingMsgs, text)

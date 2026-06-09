@@ -232,6 +232,96 @@ func TestMapAppServerRateLimits_PrefersMultiBucketView(t *testing.T) {
 	}
 }
 
+func TestAppServerSession_AgentMessageDeltaEmitsTextImmediately(t *testing.T) {
+	s := &appServerSession{events: make(chan core.Event, 4)}
+
+	s.handleNotification("item/agentMessage/delta", mustMarshalRaw(t, map[string]any{
+		"threadId": "thread-1",
+		"turnId":   "turn-1",
+		"itemId":   "item-1",
+		"delta":    "hello",
+	}))
+
+	event := recvCoreEvent(t, s.events)
+	if event.Type != core.EventText {
+		t.Fatalf("event type = %s, want %s", event.Type, core.EventText)
+	}
+	if event.Content != "hello" {
+		t.Fatalf("content = %q, want hello", event.Content)
+	}
+	if event.SessionID != "thread-1" {
+		t.Fatalf("session id = %q, want thread-1", event.SessionID)
+	}
+	if event.Metadata["turn_id"] != "turn-1" || event.Metadata["item_id"] != "item-1" || event.Metadata["is_delta"] != true {
+		t.Fatalf("metadata = %#v", event.Metadata)
+	}
+}
+
+func TestAppServerSession_AgentMessageCompletedDoesNotDuplicateStreamedDelta(t *testing.T) {
+	s := &appServerSession{events: make(chan core.Event, 8)}
+
+	s.handleNotification("turn/started", mustMarshalRaw(t, map[string]any{
+		"turn": map[string]any{"id": "turn-1"},
+	}))
+	s.handleNotification("item/agentMessage/delta", mustMarshalRaw(t, map[string]any{
+		"threadId": "thread-1",
+		"turnId":   "turn-1",
+		"itemId":   "item-1",
+		"delta":    "hello",
+	}))
+	s.handleNotification("item/completed", mustMarshalRaw(t, map[string]any{
+		"threadId": "thread-1",
+		"turnId":   "turn-1",
+		"item": map[string]any{
+			"id":   "item-1",
+			"type": "agentMessage",
+			"text": "hello",
+		},
+	}))
+	s.handleNotification("turn/completed", mustMarshalRaw(t, map[string]any{
+		"turn": map[string]any{"id": "turn-1"},
+	}))
+
+	first := recvCoreEvent(t, s.events)
+	if first.Type != core.EventText || first.Content != "hello" {
+		t.Fatalf("first event = %#v, want streamed hello text", first)
+	}
+	second := recvCoreEvent(t, s.events)
+	if second.Type != core.EventResult {
+		t.Fatalf("second event = %#v, want EventResult without duplicate text", second)
+	}
+	assertNoCoreEvent(t, s.events)
+}
+
+func TestAppServerSession_AgentMessageCompletedFallsBackWhenNoDelta(t *testing.T) {
+	s := &appServerSession{events: make(chan core.Event, 8)}
+
+	s.handleNotification("turn/started", mustMarshalRaw(t, map[string]any{
+		"turn": map[string]any{"id": "turn-1"},
+	}))
+	s.handleNotification("item/completed", mustMarshalRaw(t, map[string]any{
+		"threadId": "thread-1",
+		"turnId":   "turn-1",
+		"item": map[string]any{
+			"id":   "item-1",
+			"type": "agentMessage",
+			"text": "final answer",
+		},
+	}))
+	s.handleNotification("turn/completed", mustMarshalRaw(t, map[string]any{
+		"turn": map[string]any{"id": "turn-1"},
+	}))
+
+	first := recvCoreEvent(t, s.events)
+	if first.Type != core.EventText || first.Content != "final answer" {
+		t.Fatalf("first event = %#v, want fallback final text", first)
+	}
+	second := recvCoreEvent(t, s.events)
+	if second.Type != core.EventResult {
+		t.Fatalf("second event = %#v, want EventResult", second)
+	}
+}
+
 func TestAppServerSession_HandleRequestUserInputEmitsAskQuestion(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -404,6 +494,35 @@ func serverRequestProbe(t *testing.T, idJSON, method string, params any) map[str
 		"id":     json.RawMessage(idJSON),
 		"method": methodJSON,
 		"params": paramsJSON,
+	}
+}
+
+func mustMarshalRaw(t *testing.T, value any) json.RawMessage {
+	t.Helper()
+	data, err := json.Marshal(value)
+	if err != nil {
+		t.Fatalf("marshal raw: %v", err)
+	}
+	return data
+}
+
+func recvCoreEvent(t *testing.T, events <-chan core.Event) core.Event {
+	t.Helper()
+	select {
+	case event := <-events:
+		return event
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for core event")
+	}
+	return core.Event{}
+}
+
+func assertNoCoreEvent(t *testing.T, events <-chan core.Event) {
+	t.Helper()
+	select {
+	case event := <-events:
+		t.Fatalf("unexpected core event: %#v", event)
+	case <-time.After(50 * time.Millisecond):
 	}
 }
 
